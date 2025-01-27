@@ -41,16 +41,16 @@ except: pass
 #==============================================================================
 def _compute(t, metrics, nitrun, tc=None, graph=None, tc2=None, graph2=None, layer="c", NIT=1, ucData=None, vtune=None):
     """Compute a given number of iterations."""
-    gradP      =False
-    TBLE       =False
-    isWireModel=False
+    isGradP      = False
+    isNutildeHO  = False
+    isWireModel  = False
     if tc is not None:
         base       = Internal.getBases(tc)[0]
         solverIBC  = Internal.getNodeFromName(base ,'.Solver#IBCdefine')
         if solverIBC is not None:
-            gradP      = eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isgradP')))
-            TBLE       = eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isTBLE')))
-            isWireModel= eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isWireModel')))
+            isGradP      = eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isGradP')))
+            isNutildeHO  = eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isNutildeHO')))
+            isWireModel  = eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isWireModel')))
 
     if isWireModel and tc2 is not None:
         print("Wire model does not currently support tc2 options...exiting...")
@@ -167,11 +167,8 @@ def _compute(t, metrics, nitrun, tc=None, graph=None, tc2=None, graph2=None, lay
                     #t0=Time.time()
                     tic=Time.time()
 
-                    if not tc2:
-                        if layer_mode==0:
-                            _fillGhostcells(zones, tc, metrics, timelevel_target, vars, nstep, ompmode, hook1, TBLE=TBLE, gradP=gradP,isWireModel=isWireModel)
-                    else:
-                        _fillGhostcells2(zones, tc, tc2, metrics, timelevel_target, vars, nstep, ompmode, hook1, TBLE=TBLE, gradP=gradP)
+                    if layer_mode==0:
+                        _fillGhostcells(zones, tc, metrics, timelevel_target, vars, nstep, ompmode, hook1, tc2=tc2, isGradP=isGradP, isNutildeHO=isNutildeHO, isWireModel=isWireModel)
 
                     #print('t_fillGhost = ',  Time.time() - t0 ,'nstep =', nstep)
 
@@ -331,16 +328,18 @@ def _init_metric(t, metrics, hook):
 #==============================================================================
 def warmup(t, tc, graph=None, infos_ale=None, Adjoint=False, tmy=None, list_graph=None, Padding=None, verbose=0):
     """Perform necessary operations for the solver to run."""
-    Re  =-1
-    Lref= 1.
-    gradP      =False
-    isWireModel=False
+    Re   = -1
+    Lref =  1.
+    isGradP     = False
+    isNutildeHO = False
+    isWireModel = False
     if tc is not None:
         base       = Internal.getBases(tc)[0]
         solverIBC  = Internal.getNodeFromName(base ,'.Solver#IBCdefine')
         if solverIBC is not None:
-            gradP      = eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isgradP')))
-            isWireModel= eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isWireModel')))
+            isGradP     = eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isGradP')))
+            isNutildeHO = eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isNutildeHO')))
+            isWireModel = eval(Internal.getValue(Internal.getNodeFromName(solverIBC, 'isWireModel')))
 
             Re  = Internal.getValue(Internal.getNodeFromName(solverIBC, 'Reref'))
             Lref= Internal.getValue(Internal.getNodeFromName(solverIBC, 'Lref'))
@@ -369,6 +368,7 @@ def warmup(t, tc, graph=None, infos_ale=None, Adjoint=False, tmy=None, list_grap
     FastC._reorder(t, tc)
     # Construction param_int et param_real des zones
     FastC._buildOwnData(t, Padding)
+    FastC._setMafzalInfo(t, tc)
     t = Internal.rmNodesByName(t, 'NbptsLinelets')
 
     #init hook necessaire pour info omp
@@ -402,7 +402,7 @@ def warmup(t, tc, graph=None, infos_ale=None, Adjoint=False, tmy=None, list_grap
     rmConsVars = True
     adjoint = Adjoint
 
-    t, FastC.FIRST_IT, zones2compact = FastC.createPrimVars(t, ompmode, rmConsVars, adjoint, gradP,isWireModel)
+    t, FastC.FIRST_IT, zones2compact = FastC.createPrimVars(t, ompmode, rmConsVars, adjoint, isGradP, isNutildeHO, isWireModel)
     FastC.HOOK['FIRST_IT'] = FastC.FIRST_IT
 
     zones = Internal.getZones(t)
@@ -524,7 +524,7 @@ def warmup(t, tc, graph=None, infos_ale=None, Adjoint=False, tmy=None, list_grap
     if infos_ale is not None and len(infos_ale) == 3: nitrun = infos_ale[2]
     timelevel_target = int(dtloc[4])
 
-    _fillGhostcells(zones, tc, metrics, timelevel_target, ['Density'], nstep,  ompmode, hook1,isWireModel=isWireModel)
+    _fillGhostcells(zones, tc, metrics, timelevel_target, ['Density'], nstep,  ompmode, hook1, isWireModel=isWireModel)
 
     if tc is not None: C._rmVars(tc, 'FlowSolution')
     #
@@ -1150,10 +1150,9 @@ def _applyBC(t, metrics, hook1, nstep, var="Density"):
     return None
 
 #==============================================================================
-def _fillGhostcells(zones, tc, metrics, timelevel_target, vars, nstep, omp_mode, hook1, nitmax=1, rk=1, exploc=0, num_passage=1, gradP=False, TBLE=False, isWireModel=False):
+def _fillGhostcells(zones, tc, metrics, timelevel_target, vars, nstep, omp_mode, hook1, nitmax=1, rk=1, exploc=0, num_passage=1, tc2=None, isGradP=False, isNutildeHO=False, isWireModel=False):
     # timecount = numpy.zeros(4, dtype=numpy.float64)
 
-    varsGrad = []
     if hook1['lexit_lu'] ==0:
 
         #transfert
@@ -1173,26 +1172,45 @@ def _fillGhostcells(zones, tc, metrics, timelevel_target, vars, nstep, omp_mode,
 
                 for v in vars: C._cpVars(zones, 'centers:'+v, zonesD, v)
 
-                if gradP:
-                    varsGrad = ['Density', 'gradxDensity']
-                    for v in varsGrad: C._cpVars(zones, 'centers:'+v, zonesD,  v)
-                    varType = 22 ; type_transfert = 2 ; no_transfert   = 1
-                    # varType 22 means that there is 6 variables and 6 gradVariables to transfers
-                    # to avoid interfering with the original ___setInterpTransfers, we instead use ___setInterpTransfers4GradP
-                    Connector.connector.___setInterpTransfers4GradP(zones, zonesD, varsGrad, param_int, param_real, timelevel_target, varType, type_transfert, no_transfert, nstep, nitmax, rk, exploc, num_passage)#,timecount)
-                    varType = 21
+                if isGradP or isNutildeHO: # Send extra information for ibctype 10 (mafzal) -> pressure, nutilde, velocities, etc.
+                    if isGradP and not isNutildeHO: 
+                        varType = 22
+                        varsGrad = ['gradxPressure']
+                        vars_loc = varsGrad
+                    elif isNutildeHO and not isGradP: 
+                        varType = 23
+                        varsGrad = ['gradxTurbulentSANuTilde']
+                        vars_loc = vars+varsGrad
+                    else: 
+                        varType = 24
+                        varsGrad = ['gradxTurbulentSANuTilde']
+                        vars_loc = vars+varsGrad
+                        
+                    if tc2 is not None:
+                        zonesD2 = Internal.getZones(tc2)
+                        tc2_compact = Internal.getNodeFromName1( tc2, 'Parameter_real')
+                        param_real2 = tc2_compact[1]
+                        param_int2 = Internal.getNodeFromName1(tc2, 'Parameter_int' )[1]
 
-                if TBLE: # need to be optimised
-                    variablesIBC = ["Density", "Temperature", "gradxDensity", "gradyDensity", "gradzDensity", "gradxTemperature", "gradyTemperature", "gradzTemperature",
-                                    'gradxVelocityX','gradyVelocityX','gradzVelocityX',
-                                    'gradxVelocityY','gradyVelocityY','gradzVelocityY',
-                                    'gradxVelocityZ','gradyVelocityZ','gradzVelocityZ',
-                                    'VelocityX','VelocityY','VelocityZ',
-                                    ]
-                    for v in variablesIBC: C._cpVars(zones, 'centers:'+v, zonesD, v)
-                    XOD._setInterpTransfers(zones, zonesD, type_transfert=0, variables=variablesIBC, variablesIBC=[], compact=0)
-                    XOD._setIBCTransfers4FULLTBLE(zones, zonesD, variablesIBC=variablesIBC)
+                        if varType == 23 or varType == 24:
+                            for v in vars: C._cpVars(zones, 'centers:'+v, zonesD2, v)
 
+                        for v in varsGrad:
+                            C._cpVars(zones, 'centers:'+v, zonesD,  v)
+                            C._cpVars(zones, 'centers:'+v, zonesD2, v)
+
+                        #tc2 -> RCV ZONES
+                        type_transfert = 21 ; no_transfert = 1
+                        Connector.connector.___setInterpTransfers(zones, zonesD2, vars_loc, dtloc, param_int2, param_real2, timelevel_target, varType, type_transfert, no_transfert, nstep, nitmax, rk, exploc, num_passage, 0)
+                        #RCV ZONES -> tc
+                        type_transfert = 11 ; no_transfert = 1
+                        Connector.connector.___setInterpTransfers(zones, zonesD, vars_loc, dtloc, param_int, param_real, timelevel_target, varType, type_transfert, no_transfert, nstep, nitmax, rk, exploc, num_passage, 0)
+                        varType = 21
+                    else:
+                        for v in varsGrad: C._cpVars(zones, 'centers:'+v, zonesD,  v)
+                        type_transfert = 2 ; no_transfert = 1
+                        Connector.connector.___setInterpTransfers(zones, zonesD, vars_loc, dtloc, param_int, param_real, timelevel_target, varType, type_transfert, no_transfert, nstep, nitmax, rk, exploc, num_passage, 0)
+                        varType = 21
 
                 if isWireModel:
                     type_transfert  = 1
@@ -1213,76 +1231,6 @@ def _fillGhostcells(zones, tc, metrics, timelevel_target, vars, nstep, omp_mode,
         if exploc != 1:
             _applyBC(zones, metrics, hook1, nstep, var=vars[0])
         #t1=Time.time()
-        #print("Time BC",(t1-t0))
-
-    return None
-
-#==============================================================================
-# modified _fillGhostCells for two image points (tc + tc2) for gradP
-#==============================================================================
-def _fillGhostcells2(zones, tc, tc2, metrics, timelevel_target, vars, nstep, omp_mode, hook1, nitmax=1, rk=1, exploc=0, num_passage=1, gradP=False, TBLE=False):
-
-    # timecount = numpy.zeros(4, dtype=numpy.float64)
-    if hook1['lexit_lu'] ==0:
-
-        #transfert
-        if tc is not None:
-            tc_compact = Internal.getNodeFromName1(tc, 'Parameter_real')
-            #Si param_real n'existe pas, alors pas de raccord dans tc
-            if tc_compact is not None:
-
-                param_real= tc_compact[1]
-                param_int = Internal.getNodeFromName1(tc, 'Parameter_int')[1]
-                zonesD    = Internal.getZones(tc)
-                zonesD2   = Internal.getZones(tc2)
-
-                if hook1["neq_max"] == 5: varType = 2
-                else                    : varType = 21
-
-                dtloc = hook1['dtloc']
-
-                for v in vars: C._cpVars(zones, 'centers:'+v, zonesD, v)
-
-                if gradP:
-                    tc2_compact = Internal.getNodeFromName1( tc2, 'Parameter_real')
-                    param_real2= tc2_compact[1]
-                    param_int2 = Internal.getNodeFromName1(tc2, 'Parameter_int' )[1]
-                    varsGrad = ['Density', 'gradxDensity']
-                    for v in varsGrad:
-                        C._cpVars(zones, 'centers:'+v, zonesD,  v)
-                        C._cpVars(zones, 'centers:'+v, zonesD2, v)
-                    #tc2 -> RCV ZONES
-                    varType = 23 ; type_transfert = 2 ; no_transfert   = 1
-                    Connector.connector.___setInterpTransfers4GradP(zones, zonesD2, varsGrad, param_int2, param_real2, timelevel_target, varType, type_transfert, no_transfert, nstep, nitmax, rk, exploc, num_passage)
-                    #RCV ZONES -> tc
-                    varType = 24 ; type_transfert = 1 ; no_transfert   = 1
-                    Connector.connector.___setInterpTransfers4GradP(zones, zonesD, varsGrad, param_int, param_real, timelevel_target, varType, type_transfert, no_transfert, nstep, nitmax, rk, exploc, num_passage)
-                    varType = 21
-
-                elif TBLE: # need to be optimised
-                    variablesIBC = ["Density", "Temperature", "gradxDensity", "gradyDensity", "gradzDensity", "gradxTemperature", "gradyTemperature", "gradzTemperature",
-                                    'gradxVelocityX','gradyVelocityX','gradzVelocityX',
-                                    'gradxVelocityY','gradyVelocityY','gradzVelocityY',
-                                    'gradxVelocityZ','gradyVelocityZ','gradzVelocityZ',
-                                    'VelocityX','VelocityY','VelocityZ']
-                    for v in variablesIBC: C._cpVars(zones, 'centers:'+v, zonesD, v)
-                    XOD._setInterpTransfers(zones, zonesD,  type_transfert=0, variables=variablesIBC, variablesIBC=[], compact=0)
-                    for v in variablesIBC: C._cpVars(zones, 'centers:'+v, zonesD2, v)
-                    XOD._setIBCTransfers4FULLTBLE(zones, zonesD2, variablesIBC=variablesIBC)
-                    XOD._setIBCTransfers4FULLTBLE2(zones, zonesD, variablesIBC=variablesIBC)
-
-
-                type_transfert = 2  # 0= ID uniquement, 1= IBC uniquement, 2= All
-                no_transfert   = 1  # dans la list des transfert point a point
-                Connector.connector.___setInterpTransfers(zones, zonesD, vars, dtloc, param_int, param_real, timelevel_target, varType, type_transfert, no_transfert, nstep, nitmax, rk, exploc, num_passage, 0)#,timecount)
-
-
-        #apply BC
-        #t0=timeit.default_timer()
-        if exploc != 1:
-            #if rk != 3 and exploc != 2:
-            _applyBC(zones, metrics, hook1, nstep, var=vars[0])
-        #t1=timeit.default_timer()
         #print("Time BC",(t1-t0))
 
     return None

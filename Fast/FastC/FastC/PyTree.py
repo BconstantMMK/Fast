@@ -141,8 +141,9 @@ def _reorder(t, tc=None):
 
     if tc is not None:
         #reordone les bases, sinon souci potentiel en MPi si ordre base != entre proc
-        Internal._sortByName(tc,recursive=False)
-        Internal._sortByName(t, recursive=False)
+        Internal._copySort(t, tc, recursive=False)
+        # Internal._sortByName(tc,recursive=False)
+        # Internal._sortByName(t, recursive=False)
 
         #reordone les zones de tc par taille decroissante dans chaque base pour optim openmp
         bases_tc = Internal.getNodesFromType1(tc, 'CGNSBase_t')
@@ -211,14 +212,14 @@ def _reorder(t, tc=None):
 # IN: adim: etat de reference, on utilise uniquement cvInf pour la temperature.
 # IN: rmConsVars: if True, remove the conservative variables
 #==============================================================================
-def createPrimVars(t, omp_mode, rmConsVars=True, Adjoint=False, gradP=False, isWireModel=False, lbmAJ=True):
+def createPrimVars(t, omp_mode, rmConsVars=True, Adjoint=False, isGradP=False, isNutildeHO=False, isWireModel=False, lbmAJ=True):
     """Create primitive vars from conservative vars."""
     tp = Internal.copyRef(t)
-    first_iter , vars_zones = _createPrimVars(tp, omp_mode, rmConsVars, Adjoint, gradP=gradP, isWireModel=isWireModel, lbmAJ=lbmAJ)
+    first_iter , vars_zones = _createPrimVars(tp, omp_mode, rmConsVars, Adjoint, isGradP=isGradP, isNutildeHO=isNutildeHO, isWireModel=isWireModel, lbmAJ=lbmAJ)
     return tp, first_iter, vars_zones
 
 #==============================================================================
-def _createPrimVars(t, omp_mode, rmConsVars=True, Adjoint=False, gradP=False, isWireModel=False, lbmAJ=True):
+def _createPrimVars(t, omp_mode, rmConsVars=True, Adjoint=False, isGradP=False, isNutildeHO=False, isWireModel=False, lbmAJ=True):
     """Create primitive vars from conservative vars."""
     vars_zones=[]
     flag_NSLBM = 0
@@ -253,7 +254,7 @@ def _createPrimVars(t, omp_mode, rmConsVars=True, Adjoint=False, gradP=False, is
                 else:
                     model_loc = 'Euler'; print("WARNING: definition model: nothing found in base or zone: Euler imposed.")
 
-            sa, lbmflag, neq_lbm, FIRST_IT = _createVarsFast(b, z, omp_mode, rmConsVars, Adjoint, gradP=gradP, isWireModel=isWireModel, flag_coupNSLBM=flag_NSLBM, lbmAJ=lbmAJ)
+            sa, lbmflag, neq_lbm, FIRST_IT = _createVarsFast(b, z, omp_mode, rmConsVars, Adjoint, isGradP=isGradP, isNutildeHO=isNutildeHO, isWireModel=isWireModel, flag_coupNSLBM=flag_NSLBM, lbmAJ=lbmAJ)
 
             if FA_intext is not None:
                 Internal.getNodeFromPath(z, 'NFaceElements')[2] +=[FA_indx, FA_intext]
@@ -370,9 +371,13 @@ def _createPrimVars(t, omp_mode, rmConsVars=True, Adjoint=False, gradP=False, is
                     fields2compact.append('centers:'+v)
                 vars.append(fields2compact)
 
-            if gradP:
+            if isGradP or isNutildeHO:
+                if isGradP and isNutildeHO: vars_loc = ['TurbulentSANuTilde', 'Pressure'] 
+                elif isNutildeHO: vars_loc = ['TurbulentSANuTilde']
+                else: vars_loc = ['Pressure']
+
                 fields2compact=[]
-                for v in ['Density', 'Temperature']:
+                for v in vars_loc:
                     fields2compact.append('centers:'+'gradx'+v)
                     fields2compact.append('centers:'+'grady'+v)
                     fields2compact.append('centers:'+'gradz'+v)
@@ -440,7 +445,7 @@ def _createPrimVars(t, omp_mode, rmConsVars=True, Adjoint=False, gradP=False, is
 #==============================================================================
 # Init/create primitive Variable
 #==============================================================================
-def _createVarsFast(base, zone, omp_mode, rmConsVars=True, adjoint=False, gradP=False,isWireModel=False, flag_coupNSLBM=0, lbmAJ=True):
+def _createVarsFast(base, zone, omp_mode, rmConsVars=True, adjoint=False, isGradP=False, isNutildeHO=False, isWireModel=False, flag_coupNSLBM=0, lbmAJ=True):
     import timeit
     # Get model
     model = "Euler"
@@ -514,14 +519,15 @@ def _createVarsFast(base, zone, omp_mode, rmConsVars=True, adjoint=False, gradP=
         if C.isNamePresent(zone, 'centers:Temperature_P1') != 1: C._cpVars(zone, 'centers:Temperature', zone, 'centers:Temperature_P1')
         if sa and C.isNamePresent(zone, 'centers:TurbulentSANuTilde_P1') != 1: C._cpVars(zone, 'centers:TurbulentSANuTilde', zone, 'centers:TurbulentSANuTilde_P1')
 
-        if gradP and C.isNamePresent(zone, 'centers:gradxDensity') != 1:
-            C._initVars(zone, 'centers:gradxDensity', 1e-15)
-            C._initVars(zone, 'centers:gradyDensity', 1e-15)
-            C._initVars(zone, 'centers:gradzDensity', 1e-15)
+        if isNutildeHO and C.isNamePresent(zone, 'centers:gradxTurbulentSANuTilde') != 1:
+            C._initVars(zone, 'centers:gradxTurbulentSANuTilde', 1e-15)
+            C._initVars(zone, 'centers:gradyTurbulentSANuTilde', 1e-15)
+            C._initVars(zone, 'centers:gradzTurbulentSANuTilde', 1e-15)
 
-            C._initVars(zone, 'centers:gradxTemperature', 1e-15)
-            C._initVars(zone, 'centers:gradyTemperature', 1e-15)
-            C._initVars(zone, 'centers:gradzTemperature', 1e-15)
+        if isGradP and C.isNamePresent(zone, 'centers:gradxPressure') != 1:
+            C._initVars(zone, 'centers:gradxPressure', 1e-15)
+            C._initVars(zone, 'centers:gradyPressure', 1e-15)
+            C._initVars(zone, 'centers:gradzPressure', 1e-15)
 
         if isWireModel:
             if C.isNamePresent(zone, 'centers:Density_WM') != 1:
@@ -1061,7 +1067,7 @@ def _buildOwnData(t, Padding):
     first = Internal.getNodeFromName1(t, 'MafzalMode')
     if first is not None: MafzalMode = Internal.getValue(first)
 
-    AlphaGradP = 1
+    AlphaGradP = 1000.
     first = Internal.getNodeFromName1(t, 'AlphaGradP')
     if first is not None: AlphaGradP = Internal.getValue(first)
 
@@ -4260,6 +4266,25 @@ def _pushWalls(t, teff):
         cz[:] = cwz[:]
     return None
 
+def _setMafzalInfo(t, tc):
+    """Set wall modelling info for extended Musker wall law (Mafzal - ibctype 10)."""
+
+    MafzalMode = 3
+    first = Internal.getNodeFromName(tc, 'MafzalMode')
+    if first is not None: MafzalMode = Internal.getValue(first)
+
+    AlphaGradP = 1000.
+    first = Internal.getNodeFromName(tc, 'AlphaGradP')
+    if first is not None: AlphaGradP = Internal.getValue(first)
+
+    zones = Internal.getZones(t)
+    for z in zones:
+        n = Internal.getNodeFromName2(z, 'Parameter_real')[1]
+        n[57] = MafzalMode
+        n[58] = AlphaGradP
+
+    return None
+
 #==============================================================================
 # Stats post processing for IBM
 #==============================================================================
@@ -4443,7 +4468,7 @@ def tcStat_IBC(t,tc,vartTypeIBC=2,bcTypeIB=3):
 def prepGraphs(t, exploc=0):
 
     #reorder base pour avoir procList consistant avec reorder du warmup. Sinon boom possible miseaplatdonnorTree
-    Internal._sortByName(t,recursive=False)
+    # Internal._sortByName(t,recursive=False)
 
     graphID   = Cmpi.computeGraph(t, type='ID'  , reduction=False, exploc=exploc)
     graphIBCD = Cmpi.computeGraph(t, type='IBCD', reduction=False, exploc=exploc)
